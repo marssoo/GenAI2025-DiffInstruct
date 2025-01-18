@@ -1,5 +1,3 @@
-# Ignore the coffre/ folder
 coffre/
-
-# Ignore the data/ folder
 data/
+__pycache__
