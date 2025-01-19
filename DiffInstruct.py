@@ -26,12 +26,15 @@ def load_models(dm_path, generator_path, latent_dim, device):
 def loss_phi(s_phi, batch_size, device, x0):
     # Sample x_t from the diffusion process
     t = torch.randint(0, s_phi.timesteps, (batch_size,), device=device).long()
-    xt = q_sample(x0, t, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod)
+    noise = torch.randn_like(x0)
+    x_noisy = q_sample(x0, t, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod, noise)
+    s_phi_prediction = s_phi(x_noisy, t)
+    
     weights = w(t).to(device).view(-1, 1, 1, 1)
-    s_phi_prediction = s_phi(xt, t)
 
     # Loss and update on the diffusion model
-    phi_loss = weights * nn.functional.mse_loss(s_phi_prediction, xt, reduction='none')
+
+    phi_loss = weights * nn.functional.mse_loss(s_phi_prediction, noise, reduction='none')
     
     return phi_loss
 

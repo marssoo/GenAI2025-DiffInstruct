@@ -136,7 +136,7 @@ class UNetDM(nn.Module):
                 for i in reversed(range(0, self.timesteps)):
                     t_tensor = torch.full((1,), i, device=device, dtype=torch.long)
                     img = self.p_sample(img, t_tensor, i, betas, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod, posterior_variance)
-                samples.append(img.squeeze().cpu().numpy())
+                samples.append(img.squeeze().cpu())
             return samples
 
     @torch.no_grad()

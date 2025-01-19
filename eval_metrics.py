@@ -3,21 +3,26 @@ import torch
 import torch.nn.functional as F
 from torchvision.models import inception_v3
 from sklearn.metrics import pairwise_distances
+from sklearn.metrics.pairwise import polynomial_kernel
 
 
 def preprocess_images(images):
-    """
-    InceptionV3 requires images to of size (299, 299).
-    """
-    if images.ndim == 3:  # Add batch dimension if missing
+    # make sure we have abatch
+    if images.ndim == 3:  # Shape: (C, H, W)
         images = images.unsqueeze(0)
+
+    # making sure 
+    if images.ndim != 4:
+        raise ValueError(f"Expected input tensor to have 4 dimensions (N, C, H, W), but got shape {images.shape}")
 
     # Convert grayscale to RGB by duplicating channels (yeah)
     if images.size(1) == 1:
         images = images.repeat(1, 3, 1, 1)
 
+    # Resize to 299x299 (InceptionV3's input size)
     images = F.interpolate(images, size=(299, 299), mode='bilinear', align_corners=False)
 
+    # Normalize to [-1, 1] (expected by InceptionV3)
     images = (images - 0.5) * 2
 
     return images
@@ -26,6 +31,7 @@ def preprocess_images(images):
 def extract_features(images, model):
     """Extract features from images using the InceptionV3 model."""
     images = preprocess_images(images)
+    images = images.float()
     with torch.no_grad():
         features = model(images).cpu().numpy()
     return features
@@ -46,7 +52,8 @@ def compute_precision(real_features, fake_features, k=3):
 
 
 def recall_score(real_images, fake_images, k=3, device='cuda'):
-
+    real_images = real_images.to(torch.float32)
+    fake_images = fake_images.to(torch.float32)
     # Load InceptionV3
     inception = inception_v3(pretrained=True, transform_input=False).to(device)
     inception.fc = torch.nn.Identity()  # Remove final classification layer
@@ -133,7 +140,7 @@ if __name__ == "__main__":
     recall = recall_score([real_images], [fake_images], k=3, device=device)
     precision = precision_score([real_images], [fake_images], k=3, device=device)
     kid = kid_score([real_images], [fake_images], device=device)
-    
+
     print(f"Recall Score: {recall}")
     print(f"Precision Score: {precision}")
 
