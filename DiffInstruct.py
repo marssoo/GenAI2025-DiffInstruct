@@ -1,6 +1,7 @@
 import argparse
 import torch
 import torch.nn as nn
+import numpy as np
 import torch.optim as optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from DM import UNetDM, q_sample
@@ -53,56 +54,61 @@ def loss_theta(s_phi, sp_t, batch_size, device, x0):
         sp_t_prediction = sp_t(xt, t)
     sp_t.eval()
 
-    loss = weights * ((s_phi_prediction - sp_t_prediction) * x0)
+    loss = weights * ((s_phi_prediction - sp_t_prediction) * xt)
 
     return loss
 
-def train_diff_instruct(dm_path, generator_path, betas, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod, w, lr_phi, lr_theta, save_path_phi, save_path_theta, patience, device, epochs, timesteps, latent_dim, batch_size):
+def train_diff_instruct(dm_path, generator_path, betas, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod, w, lr_phi, lr_theta, save_path_phi, save_path_theta, patience, device, epochs, timesteps, latent_dim, batch_size, save_every_15, save_logs, run_name):
     sp_t, s_phi, generator = load_models(dm_path, generator_path, latent_dim, device=device)
-
+    #sp_t, s_phi, _ = load_models(dm_path, generator_path, latent_dim, device=device)
+    #del _
+    #generator = Generator(latent_dim, 1, 128).to(device)
+    
     optimizer_phi = optim.Adam(s_phi.parameters(), lr=lr_phi)
     optimizer_theta = optim.Adam(generator.parameters(), lr=lr_theta)
-    scheduler_phi = ReduceLROnPlateau(optimizer_phi, mode='min', factor=0.8, patience=4, verbose=True, min_lr=1e-7)
+    #scheduler_phi = ReduceLROnPlateau(optimizer_phi, mode='min', factor=0.8, patience=4, verbose=True, min_lr=1e-7)
     #scheduler_theta = ReduceLROnPlateau(optimizer, mode='min', factor=0.8, patience=4, verbose=True, min_lr=1e-6)
     best_phi_loss = float('inf')
     patience_counter = 0
 
     for epoch in range(epochs):
-        optimizer_phi.zero_grad(set_to_none=True)
-        
-        #### Update s_phi (DM)
-        #generate samples
-        with torch.no_grad():
-            generator.eval()
-            z = torch.randn((batch_size, latent_dim), device=device)
-            x0 = generator(z)
-            generator.train()
+        for _ in range(args.accumulation_phi):
+            optimizer_phi.zero_grad(set_to_none=True)
 
-        phi_loss = loss_phi(s_phi, batch_size, device, x0)
-        phi_loss = phi_loss.sum() / batch_size
+            #### Update s_phi (DM)
+            #generate samples
+            with torch.no_grad():
+                generator.eval()
+                z = torch.randn((batch_size, latent_dim), device=device)
+                x0 = generator(z)
+                generator.train()
 
-        phi_loss.backward()
-        optimizer_phi.step()
+            phi_loss = loss_phi(s_phi, batch_size, device, x0)
+            phi_loss = phi_loss.sum() / batch_size
+
+            phi_loss.backward()
+            optimizer_phi.step()
 
         #### Update generator (theta)
-        optimizer_theta.zero_grad(set_to_none=True)
-        # generate images
-        z = torch.randn((batch_size, latent_dim), device=device)
-        x0 = generator(z)
+        for _ in range(args.accumulation_theta):
+            optimizer_theta.zero_grad(set_to_none=True)
+            # generate images
+            z = torch.randn((batch_size, latent_dim), device=device)
+            x0 = generator(z)
 
-        s_phi.eval()
-        theta_loss = loss_theta(s_phi, sp_t, batch_size, device, x0)
-        s_phi.train()                                                   #there is some redundancy in the original repo, for now I am keeping it
+            s_phi.eval()
+            theta_loss = loss_theta(s_phi, sp_t, batch_size, device, x0)
+            s_phi.train()                                                   #there is some redundancy in the original repo, for now I am keeping it
 
-        theta_loss = theta_loss.sum([1, 2, 3])
-        #print(theta_loss.shape)
+            theta_loss = theta_loss.sum([1, 2, 3])
+            #print(theta_loss.shape)
 
-        theta_loss = theta_loss.sum() / batch_size
-        theta_loss.backward()
-        optimizer_theta.step()
+            theta_loss = theta_loss.sum() / batch_size
+            theta_loss.backward()
+            optimizer_theta.step()
 
-        print(f"Epoch {epoch + 1}/{epochs}\t - Phi Loss: {phi_loss.item():.8f}, Theta Loss: {theta_loss.item():.6f}")
-        scheduler_phi.step(phi_loss)
+        print(f"Epoch {epoch + 1}/{epochs}\t - Phi Loss: {phi_loss.item():.8f}, Gradient Theta : {theta_loss.item():.6f}")
+        #scheduler_phi.step(phi_loss)
         
         if phi_loss.item() < best_phi_loss:
             best_phi_loss = phi_loss.item()
@@ -114,6 +120,14 @@ def train_diff_instruct(dm_path, generator_path, betas, sqrt_alphas_cumprod, sqr
         else:
             patience_counter += 1
         # Early stopping based on phi_loss
+        if epoch % 15 == 0 and save_every_15:
+            torch.save(generator.state_dict(), f'DI_models/tracking/DI_generator_{run_name}_round_{epoch}.pth')
+
+        if save_logs:
+            with open(f'DI_models/tracking/logs_{run_name}.csv', 'a') as f:
+                if epoch == 0:
+                    f.write('round,phi_loss,theta_grad\n')
+                f.write(f'{epoch},{phi_loss.item()},{theta_loss.item()}\n')
         if  patience_counter >= patience:
             print("Early stopping triggered.")
             break
@@ -124,14 +138,19 @@ if __name__ == "__main__":
     parser.add_argument('--dm_path', type=str, default="DM_models/UNet_4layers_128hc_2000steps.pth", help="Path to the pre-trained DM model")
     parser.add_argument('--generator_path', type=str, default="GAN_models/best_generator.pth", help="Path to the pre-trained GAN generator")
     parser.add_argument('--batch_size', type=int, default=128, help="Batch size for training")
-    parser.add_argument('--lr_phi', type=float, default=2e-5, help="Learning rate for updating phi (DM)")
-    parser.add_argument('--lr_theta', type=float, default=2e-5, help="Learning rate for updating theta (GAN generator)")
+    parser.add_argument('--lr_phi', type=float, default=1e-4, help="Learning rate for updating phi (DM)")
+    parser.add_argument('--lr_theta', type=float, default=1e-4, help="Learning rate for updating theta (GAN generator)")
     parser.add_argument('--save_path_phi', type=str, default="DI_models/DI_phi.pth", help="Path to save the updated DM model")
     parser.add_argument('--save_path_theta', type=str, default="DI_models/DI_generator.pth", help="Path to save the updated GAN generator")
-    parser.add_argument('--patience', type=int, default=50, help="Patience for early stopping")
+    parser.add_argument('--patience', type=int, default=np.inf, help="Patience for early stopping")
     parser.add_argument('--epochs', type=int, default=7000, help="Number of training epochs")
     parser.add_argument('--timesteps', type=int, default=2000, help="Number of diffusion timesteps")
     parser.add_argument('--latent_dim', type=int, default=128, help="Latent dimension of the generator")
+    parser.add_argument('--accumulation_phi', type=int, default=1, help="rounds of accumulation for the implicit DM")
+    parser.add_argument('--accumulation_theta', type=int, default=1, help="rounds of accumulation for the generator")
+    parser.add_argument('--save_every_15_epochs', action='store_true', help="rounds of accumulation for the generator")
+    parser.add_argument('--save_logs', action='store_true', help="flag for saving logs")
+    parser.add_argument('--run_name', type=str, default="", help="name of the run")
 
     args = parser.parse_args()
 
@@ -165,5 +184,8 @@ if __name__ == "__main__":
         epochs=args.epochs,
         timesteps=timesteps,
         latent_dim=args.latent_dim,
-        batch_size=args.batch_size
+        batch_size=args.batch_size,
+        save_every_15=args.save_every_15_epochs,
+        save_logs=args.save_logs,
+        run_name=args.run_name
     )
